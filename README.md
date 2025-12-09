@@ -51,23 +51,31 @@ cargo build --release
 
 ## Running
 
-The server communicates via stdio (standard input/output):
+The server communicates via stdio (standard input/output) and requires the `COSMIC_LLM_DB_PATH` environment variable to be set:
 
 ```bash
+export COSMIC_LLM_DB_PATH="/path/to/conversations.db"
 ./target/release/mcp_luna_history
 ```
 
 Or using cargo:
 
 ```bash
+export COSMIC_LLM_DB_PATH="/path/to/conversations.db"
 cargo run --release
 ```
 
 ## Database
 
-The server connects to the SQLite database at:
-```
-/home/digit1024/.local/share/cosmic_llm/conversations.db
+The server connects to a SQLite database specified by the `COSMIC_LLM_DB_PATH` environment variable.
+
+**Required Environment Variable:**
+- `COSMIC_LLM_DB_PATH`: Path to the SQLite database file containing conversation history
+
+**Example:**
+```bash
+export COSMIC_LLM_DB_PATH="/home/digit1024/.local/share/cosmic_llm/conversations.db"
+./target/release/mcp_luna_history
 ```
 
 The database must contain:
@@ -86,7 +94,10 @@ Example configuration (for Claude Desktop or similar):
   "mcpServers": {
     "cosmic-llm-history": {
       "command": "/path/to/mcp_luna_history/target/release/mcp_luna_history",
-      "args": []
+      "args": [],
+      "env": {
+        "COSMIC_LLM_DB_PATH": "/path/to/conversations.db"
+      }
     }
   }
 }
