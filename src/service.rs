@@ -32,6 +32,7 @@ pub struct SearchTitlesRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Request parameters for listing conversations")]
 pub struct ListConversationsRequest {
     #[schemars(description = "Maximum number of conversations to return (default: 50, max: 200)")]
     pub limit: Option<u32>,
@@ -57,6 +58,13 @@ pub struct SearchResult {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Wrapper for search results array")]
+pub struct SearchResultsResponse {
+    pub items: Vec<SearchResult>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename_all = "camelCase")]
 pub struct Conversation {
     pub id: String,
     pub title: String,
@@ -67,6 +75,7 @@ pub struct Conversation {
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(rename_all = "camelCase")]
 pub struct Message {
     pub id: i64,
     pub conversation_id: String,
@@ -92,7 +101,13 @@ pub struct ConversationSummary {
     pub message_count: i64,
 }
 
-#[tool_router]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[schemars(description = "Wrapper for conversation summaries array")]
+pub struct ConversationSummariesResponse {
+    pub items: Vec<ConversationSummary>,
+}
+
+#[tool_router(router = tool_router)]
 impl ConversationService {
     pub fn new(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path)
@@ -108,12 +123,11 @@ impl ConversationService {
     pub fn search_conversations(
         &self,
         Parameters(SearchConversationsRequest { query }): Parameters<SearchConversationsRequest>,
-    ) -> Json<Vec<SearchResult>> {
+    ) -> Json<SearchResultsResponse> {
         let db = match self.db.lock() {
             Ok(db) => db,
-            Err(e) => {
-                eprintln!("Failed to lock database: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(SearchResultsResponse { items: Vec::new() });
             }
         };
         
@@ -133,9 +147,8 @@ impl ConversationService {
             "#
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(SearchResultsResponse { items: Vec::new() });
             }
         };
 
@@ -151,19 +164,17 @@ impl ConversationService {
             Ok(iter) => {
                 match iter.collect::<Result<Vec<_>, _>>() {
                     Ok(results) => results,
-                    Err(e) => {
-                        eprintln!("Database error collecting results: {}", e);
+                    Err(_) => {
                         Vec::new()
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Database error executing query: {}", e);
+            Err(_) => {
                 Vec::new()
             }
         };
 
-        Json(results)
+        Json(SearchResultsResponse { items: results })
     }
 
     #[tool(description = "Retrieve a complete conversation thread from past conversations with the user. Returns the full conversation including all messages, tool calls, and responses in chronological order. Returns empty object if not found.")]
@@ -173,8 +184,7 @@ impl ConversationService {
     ) -> Json<Conversation> {
         let db = match self.db.lock() {
             Ok(db) => db,
-            Err(e) => {
-                eprintln!("Failed to lock database: {}", e);
+            Err(_) => {
                 return Json(Conversation {
                     id: conversation_id.clone(),
                     title: "ERROR".to_string(),
@@ -191,8 +201,7 @@ impl ConversationService {
             "SELECT id, title, created_at, title_generated, profile_name FROM conversations WHERE id = ?"
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
+            Err(_) => {
                 return Json(Conversation {
                     id: conversation_id.clone(),
                     title: "ERROR".to_string(),
@@ -227,8 +236,7 @@ impl ConversationService {
                     messages: Vec::new(),
                 });
             }
-            Err(e) => {
-                eprintln!("Database error querying conversation: {}", e);
+            Err(_) => {
                 return Json(Conversation {
                     id: conversation_id.clone(),
                     title: "ERROR".to_string(),
@@ -253,8 +261,7 @@ impl ConversationService {
             "#
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
+            Err(_) => {
                 return Json(conversation);
             }
         };
@@ -278,14 +285,12 @@ impl ConversationService {
             Ok(iter) => {
                 match iter.collect::<Result<Vec<_>, _>>() {
                     Ok(messages) => messages,
-                    Err(e) => {
-                        eprintln!("Database error collecting messages: {}", e);
+                    Err(_) => {
                         Vec::new()
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Database error executing query: {}", e);
+            Err(_) => {
                 Vec::new()
             }
         };
@@ -298,13 +303,12 @@ impl ConversationService {
     pub fn search_conversation_titles(
         &self,
         Parameters(SearchTitlesRequest { query }): Parameters<SearchTitlesRequest>,
-    ) -> Json<Vec<ConversationSummary>> {
+    ) -> Json<ConversationSummariesResponse> {
         let search_pattern = format!("%{}%", query);
         let db = match self.db.lock() {
             Ok(db) => db,
-            Err(e) => {
-                eprintln!("Failed to lock database: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(ConversationSummariesResponse { items: Vec::new() });
             }
         };
         
@@ -326,9 +330,8 @@ impl ConversationService {
             "#
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(ConversationSummariesResponse { items: Vec::new() });
             }
         };
 
@@ -345,34 +348,31 @@ impl ConversationService {
             Ok(iter) => {
                 match iter.collect::<Result<Vec<_>, _>>() {
                     Ok(results) => results,
-                    Err(e) => {
-                        eprintln!("Database error collecting results: {}", e);
+                    Err(_) => {
                         Vec::new()
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Database error executing query: {}", e);
+            Err(_) => {
                 Vec::new()
             }
         };
 
-        Json(results)
+        Json(ConversationSummariesResponse { items: results })
     }
 
     #[tool(description = "List past conversations with the user, ordered by most recent. Useful for browsing conversation history and finding conversations by recency.")]
     pub fn list_conversations(
         &self,
         Parameters(ListConversationsRequest { limit, offset }): Parameters<ListConversationsRequest>,
-    ) -> Json<Vec<ConversationSummary>> {
+    ) -> Json<ConversationSummariesResponse> {
         let limit = limit.unwrap_or(50).min(200) as i64;
         let offset = offset.unwrap_or(0) as i64;
 
         let db = match self.db.lock() {
             Ok(db) => db,
-            Err(e) => {
-                eprintln!("Failed to lock database: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(ConversationSummariesResponse { items: Vec::new() });
             }
         };
         
@@ -393,9 +393,8 @@ impl ConversationService {
             "#
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
-                return Json(Vec::new());
+            Err(_) => {
+                return Json(ConversationSummariesResponse { items: Vec::new() });
             }
         };
 
@@ -412,19 +411,17 @@ impl ConversationService {
             Ok(iter) => {
                 match iter.collect::<Result<Vec<_>, _>>() {
                     Ok(results) => results,
-                    Err(e) => {
-                        eprintln!("Database error collecting results: {}", e);
+                    Err(_) => {
                         Vec::new()
                     }
                 }
             }
-            Err(e) => {
-                eprintln!("Database error executing query: {}", e);
+            Err(_) => {
                 Vec::new()
             }
         };
 
-        Json(results)
+        Json(ConversationSummariesResponse { items: results })
     }
 
     #[tool(description = "Retrieve a specific message from past conversations with the user by its message ID. Returns the complete message including content, role, tool calls, and any associated metadata. Returns empty message if not found.")]
@@ -434,13 +431,12 @@ impl ConversationService {
     ) -> Json<Message> {
         let db = match self.db.lock() {
             Ok(db) => db,
-            Err(e) => {
-                eprintln!("Failed to lock database: {}", e);
+            Err(_) => {
                 return Json(Message {
                     id: message_id,
                     conversation_id: "ERROR".to_string(),
                     role: "error".to_string(),
-                    content: format!("Database lock error: {}", e),
+                    content: "Database lock error".to_string(),
                     created_at: 0,
                     tool_calls: None,
                     tool_call_id: None,
@@ -464,13 +460,12 @@ impl ConversationService {
             "#
         ) {
             Ok(stmt) => stmt,
-            Err(e) => {
-                eprintln!("Database error preparing statement: {}", e);
+            Err(_) => {
                 return Json(Message {
                     id: message_id,
                     conversation_id: "ERROR".to_string(),
                     role: "error".to_string(),
-                    content: format!("Database error: {}", e),
+                    content: "Database error".to_string(),
                     created_at: 0,
                     tool_calls: None,
                     tool_call_id: None,
@@ -517,13 +512,12 @@ impl ConversationService {
                     reasoning_content: None,
                 })
             }
-            Err(e) => {
-                eprintln!("Database error querying message: {}", e);
+            Err(_) => {
                 Json(Message {
                     id: message_id,
                     conversation_id: "ERROR".to_string(),
                     role: "error".to_string(),
-                    content: format!("Database error: {}", e),
+                    content: "Database error".to_string(),
                     created_at: 0,
                     tool_calls: None,
                     tool_call_id: None,

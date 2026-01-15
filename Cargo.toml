@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-rmcp = { version = "0.8.0", features = ["server", "transport-io"] }
+rmcp = { version = "0.13.0", features = ["server", "transport-io", "macros"] }
 tokio = { version = "1", features = ["full"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.38", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = { version = "1.0", features = ["derive"] }

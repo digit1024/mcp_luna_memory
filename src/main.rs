@@ -11,17 +11,9 @@ async fn main() -> Result<()> {
         .context("COSMIC_LLM_DB_PATH environment variable must be set")?;
     let service = ConversationService::new(&db_path)?;
 
-    let server = service.serve(stdio()).await
-        .map_err(|e| {
-            eprintln!("Error starting server: {:?}", e);
-            e
-        })?;
+    let server = service.serve(stdio()).await?;
     
-    server.waiting().await
-        .map_err(|e| {
-            eprintln!("Error waiting for server: {:?}", e);
-            e
-        })?;
+    server.waiting().await?;
 
     Ok(())
 }

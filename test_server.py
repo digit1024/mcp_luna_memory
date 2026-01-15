@@ -5,6 +5,7 @@ Tests initialize, initialized notification, tools/list, and tool calls.
 """
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -12,22 +13,28 @@ from typing import Dict, Any, Optional
 
 
 class MCPServerTester:
-    def __init__(self, server_path: str):
+    def __init__(self, server_path: str, db_path: str):
         self.server_path = server_path
+        self.db_path = db_path
         self.process: Optional[subprocess.Popen] = None
         self.request_id = 1
 
     def start_server(self):
         """Start the MCP server process."""
+        env = os.environ.copy()
+        env["COSMIC_LLM_DB_PATH"] = self.db_path
+        
         self.process = subprocess.Popen(
             [self.server_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
-            bufsize=0  # Unbuffered for better real-time communication
+            bufsize=0,  # Unbuffered for better real-time communication
+            env=env
         )
         print(f"✓ Started server: {self.server_path}")
+        print(f"✓ Using database: {self.db_path}")
 
     def stop_server(self):
         """Stop the server process."""
@@ -40,7 +47,13 @@ class MCPServerTester:
             print("✓ Stopped server")
 
     def send_request(self, method: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Send a JSON-RPC request and wait for response."""
+        """
+        Send a JSON-RPC request and wait for response.
+        
+        Note: MCP uses newline-delimited JSON over stdio. Each JSON-RPC message
+        must be a single line terminated by \\n. The rmcp library handles this
+        automatically, and we use readline() to read one complete message per line.
+        """
         request = {
             "jsonrpc": "2.0",
             "id": self.request_id,
@@ -51,9 +64,10 @@ class MCPServerTester:
         
         self.request_id += 1
         
+        # Send as single-line JSON (required by MCP stdio protocol)
         request_json = json.dumps(request) + "\n"
         print(f"\n→ Sending: {method}")
-        print(f"  Request: {json.dumps(request, indent=2)}")
+        print(f"  Request: {json.dumps(request, indent=2)}")  # Pretty print for display only
         
         if not self.process or not self.process.stdin:
             raise RuntimeError("Server not started")
@@ -82,12 +96,14 @@ class MCPServerTester:
                             print(f"  Server stderr: {stderr_line.strip()}")
                 raise RuntimeError("No response from server (timeout)")
         
+        # Read single-line JSON-RPC response (MCP stdio protocol requirement)
         response_line = self.process.stdout.readline()
         if not response_line:
             raise RuntimeError("No response from server")
         
+        # Parse the single-line JSON response
         response = json.loads(response_line.strip())
-        print(f"← Response: {json.dumps(response, indent=2)}")
+        print(f"← Response: {json.dumps(response, indent=2)}")  # Pretty print for display only
         
         # Check for error response
         if "error" in response:
@@ -132,7 +148,9 @@ class MCPServerTester:
         
         assert response.get("jsonrpc") == "2.0", "Invalid JSON-RPC version"
         assert "result" in response, "No result in response"
-        assert response["result"].get("protocolVersion") == "2024-11-05", "Wrong protocol version"
+        # Accept protocol versions that rmcp may negotiate
+        protocol_version = response["result"].get("protocolVersion")
+        assert protocol_version in ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"], f"Unexpected protocol version: {protocol_version}"
         assert "capabilities" in response["result"], "No capabilities in result"
         assert "serverInfo" in response["result"], "No serverInfo in result"
         
@@ -178,19 +196,55 @@ class MCPServerTester:
             "get_message"
         ]
         
+        print(f"\nFound tools: {', '.join(tool_names)}")
         for expected in expected_tools:
             assert expected in tool_names, f"Missing tool: {expected}"
         
         print("✓ All expected tools found")
         return tools
 
+    def test_list_conversations(self, tools):
+        """Test list_conversations tool."""
+        print("\n" + "="*60)
+        print("TEST 4: List Conversations")
+        print("="*60)
+        
+        tool = next((t for t in tools if t["name"] == "list_conversations"), None)
+        assert tool is not None, "list_conversations tool not found"
+        
+        response = self.send_request("tools/call", {
+            "name": "list_conversations",
+            "arguments": {
+                "limit": 10
+            }
+        })
+        
+        assert response.get("jsonrpc") == "2.0", "Invalid JSON-RPC version"
+        assert "result" in response, "No result in response"
+        assert "content" in response["result"], "No content in result"
+        
+        content = response["result"]["content"]
+        assert len(content) > 0, "No content items"
+        assert content[0].get("type") == "text", "Invalid content type"
+        
+        # Parse the JSON response
+        import json
+        response_data = json.loads(content[0].get("text", "{}"))
+        # New format wraps arrays in objects (e.g., {"items": [...]})
+        conversations = response_data.get("items", []) if isinstance(response_data, dict) else []
+        print(f"\n✓ Found {len(conversations)} conversations:")
+        for conv in conversations[:5]:  # Show first 5
+            print(f"  - {conv.get('title')} (ID: {conv.get('id')}, {conv.get('message_count', 0)} messages)")
+        
+        print("✓ List conversations test passed")
+        return response["result"]
+
     def test_search_conversations(self, tools):
         """Test search_conversations tool."""
         print("\n" + "="*60)
-        print("TEST 4: Search Conversations Tool")
+        print("TEST 5: Search Conversations")
         print("="*60)
         
-        # Find the tool
         tool = next((t for t in tools if t["name"] == "search_conversations"), None)
         assert tool is not None, "search_conversations tool not found"
         
@@ -209,33 +263,17 @@ class MCPServerTester:
         assert len(content) > 0, "No content items"
         assert content[0].get("type") == "text", "Invalid content type"
         
+        # Parse the JSON response
+        import json
+        response_data = json.loads(content[0].get("text", "{}"))
+        # New format wraps arrays in objects (e.g., {"items": [...]})
+        results = response_data.get("items", []) if isinstance(response_data, dict) else []
+        print(f"\n✓ Found {len(results)} search results:")
+        for result in results[:5]:  # Show first 5
+            preview = result.get('content_preview', '')[:60]
+            print(f"  - Message {result.get('message_id')} in conversation {result.get('conversation_id')}: {preview}...")
+        
         print("✓ Search conversations test passed")
-        return response["result"]
-
-    def test_list_conversations(self, tools):
-        """Test list_conversations tool."""
-        print("\n" + "="*60)
-        print("TEST 5: List Conversations Tool")
-        print("="*60)
-        
-        tool = next((t for t in tools if t["name"] == "list_conversations"), None)
-        assert tool is not None, "list_conversations tool not found"
-        
-        response = self.send_request("tools/call", {
-            "name": "list_conversations",
-            "arguments": {
-                "limit": 5
-            }
-        })
-        
-        assert response.get("jsonrpc") == "2.0", "Invalid JSON-RPC version"
-        assert "result" in response, "No result in response"
-        assert "content" in response["result"], "No content in result"
-        
-        content = response["result"]["content"]
-        assert len(content) > 0, "No content items"
-        
-        print("✓ List conversations test passed")
         return response["result"]
 
     def run_all_tests(self):
@@ -271,8 +309,8 @@ class MCPServerTester:
                 return False
             
             tools = self.test_list_tools()
-            self.test_search_conversations(tools)
             self.test_list_conversations(tools)
+            self.test_search_conversations(tools)
             
             print("\n" + "="*60)
             print("✓ ALL TESTS PASSED!")
@@ -303,8 +341,6 @@ class MCPServerTester:
 
 
 def main():
-    import os
-    
     # Determine server path
     script_dir = os.path.dirname(os.path.abspath(__file__))
     server_path = os.path.join(script_dir, "target", "debug", "mcp_luna_history")
@@ -319,7 +355,19 @@ def main():
         print("Please build the server first: cargo build")
         sys.exit(1)
     
-    tester = MCPServerTester(server_path)
+    # Database path - use environment variable or default to a placeholder
+    db_path = os.environ.get("COSMIC_LLM_DB_PATH")
+    
+    if not db_path:
+        print("Error: COSMIC_LLM_DB_PATH environment variable must be set")
+        print("Example: export COSMIC_LLM_DB_PATH=/path/to/conversations.db")
+        sys.exit(1)
+    
+    if not os.path.exists(db_path):
+        print(f"Warning: Database file does not exist: {db_path}")
+        print("The server may fail to initialize.")
+    
+    tester = MCPServerTester(server_path, db_path)
     success = tester.run_all_tests()
     
     sys.exit(0 if success else 1)
