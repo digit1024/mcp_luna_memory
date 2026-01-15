@@ -1,3 +1,5 @@
+mod db;
+mod models;
 mod service;
 
 use anyhow::{Context, Result};

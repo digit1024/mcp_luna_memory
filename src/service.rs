@@ -2,109 +2,17 @@ use anyhow::{Context, Result};
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::{Json, Parameters}},
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router, ServerHandler,
+    tool, tool_handler, tool_router, ServerHandler,
 };
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+
+use crate::db;
+use crate::models::*;
 
 pub struct ConversationService {
     db: Arc<Mutex<Connection>>,
     tool_router: ToolRouter<Self>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SearchConversationsRequest {
-    #[schemars(description = "Search query to find in conversation messages")]
-    pub query: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GetConversationRequest {
-    #[schemars(description = "The unique identifier of the conversation to retrieve")]
-    pub conversation_id: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct SearchTitlesRequest {
-    #[schemars(description = "Search query to find in conversation titles")]
-    pub query: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(description = "Request parameters for listing conversations")]
-pub struct ListConversationsRequest {
-    #[schemars(description = "Maximum number of conversations to return (default: 50, max: 200)")]
-    pub limit: Option<u32>,
-    #[schemars(description = "Number of conversations to skip (default: 0)")]
-    pub offset: Option<u32>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct GetMessageRequest {
-    #[schemars(description = "The unique identifier of the message to retrieve")]
-    pub message_id: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[derive(schemars::JsonSchema)]
-#[schemars(description = "Search result from conversation messages")]
-pub struct SearchResult {
-    pub conversation_id: String,
-    pub message_id: i64,
-    pub role: String,
-    pub content_preview: String,
-    pub created_at: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(description = "Wrapper for search results array")]
-pub struct SearchResultsResponse {
-    pub items: Vec<SearchResult>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(rename_all = "camelCase")]
-pub struct Conversation {
-    pub id: String,
-    pub title: String,
-    pub created_at: i64,
-    pub title_generated: i32,
-    pub profile_name: Option<String>,
-    pub messages: Vec<Message>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(rename_all = "camelCase")]
-pub struct Message {
-    pub id: i64,
-    pub conversation_id: String,
-    pub role: String,
-    pub content: String,
-    pub created_at: i64,
-    pub tool_calls: Option<String>,
-    pub tool_call_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub tool_status: Option<String>,
-    pub tool_params_json: Option<String>,
-    pub tool_result_json: Option<String>,
-    pub reasoning_content: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-pub struct ConversationSummary {
-    pub id: String,
-    pub title: String,
-    pub created_at: i64,
-    pub title_generated: i32,
-    pub profile_name: Option<String>,
-    pub message_count: i64,
-}
-
-#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
-#[schemars(description = "Wrapper for conversation summaries array")]
-pub struct ConversationSummariesResponse {
-    pub items: Vec<ConversationSummary>,
 }
 
 #[tool_router(router = tool_router)]
@@ -112,6 +20,9 @@ impl ConversationService {
     pub fn new(db_path: &str) -> Result<Self> {
         let conn = Connection::open(db_path)
             .context("Failed to open database connection")?;
+
+        // Initialize memory module schema
+        db::init_memory_schema(&conn)?;
 
         Ok(Self {
             db: Arc::new(Mutex::new(conn)),
@@ -530,13 +441,163 @@ impl ConversationService {
             }
         }
     }
+
+    #[tool(description = "THIS IS A TOOL TO REMEMBER, OR TO UPDATE(Delete and then create) THE MEMORY.USE IT OFTEN TO REMEMBER IMPORTANT STUFF! Store important facts, preferences, or relevant information in long-term memory.")]
+    pub fn store_memory(
+        &self,
+        Parameters(StoreMemoryRequest {
+            content,
+            category,
+            importance,
+        }): Parameters<StoreMemoryRequest>,
+    ) -> Json<MemoryEntry> {
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(_) => {
+                return Json(MemoryEntry {
+                    id: 0,
+                    content: "Database lock error".to_string(),
+                    category: None,
+                    importance: 0,
+                    created_at: 0,
+                });
+            }
+        };
+
+        let importance_value = importance.unwrap_or(5);
+        let created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        match db.execute(
+            "INSERT INTO memory (content, category, importance, created_at) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![content, category, importance_value, created_at],
+        ) {
+            Ok(_) => {
+                let id = db.last_insert_rowid();
+                Json(MemoryEntry {
+                    id,
+                    content,
+                    category,
+                    importance: importance_value,
+                    created_at,
+                })
+            }
+            Err(e) => {
+                Json(MemoryEntry {
+                    id: 0,
+                    content: format!("Failed to store memory: {}", e),
+                    category: None,
+                    importance: 0,
+                    created_at: 0,
+                })
+            }
+        }
+    }
+
+    #[tool(description = "THISI IS A TOOL TO REMIND/GET CONTEXT FROM MEMORY. USE IT OFTEN! USE IT TOGETHER WITH CHAT HISTORY IF NEEDED (for details) ! Search long-term memory using full-text search. This tool finds relevant stored knowledge based on keywords or phrases. Results are ranked by relevance.")]
+    pub fn search_memory(
+        &self,
+        Parameters(SearchMemoryRequest { query }): Parameters<SearchMemoryRequest>,
+    ) -> Json<MemorySearchResponse> {
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(_) => {
+                return Json(MemorySearchResponse { items: Vec::new() });
+            }
+        };
+
+        let mut stmt = match db.prepare(
+            r#"
+            SELECT 
+                m.id,
+                m.content,
+                m.category,
+                m.importance,
+                m.created_at
+            FROM memory m
+            JOIN memory_fts ON m.id = memory_fts.rowid
+            WHERE memory_fts MATCH ?
+            ORDER BY bm25(memory_fts) ASC
+            LIMIT 10
+            "#
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => {
+                return Json(MemorySearchResponse { items: Vec::new() });
+            }
+        };
+
+        let results: Vec<MemoryEntry> = match stmt.query_map([query.as_str()], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0).unwrap_or(0),
+                content: row.get(1).unwrap_or_default(),
+                category: row.get(2).ok(),
+                importance: row.get(3).unwrap_or(5),
+                created_at: row.get(4).unwrap_or(0),
+            })
+        }) {
+            Ok(iter) => {
+                match iter.collect::<Result<Vec<_>, _>>() {
+                    Ok(results) => results,
+                    Err(_) => {
+                        Vec::new()
+                    }
+                }
+            }
+            Err(_) => {
+                Vec::new()
+            }
+        };
+
+        Json(MemorySearchResponse { items: results })
+    }
+
+    #[tool(description = "THIS IS A TOOL TO FORGET, OR TO UPDATE(Delete and then create) THE MEMORY USE IT TO CORRECT YOUR MEMORIES. Delete a memory entry by its ID. Use this to remove outdated or incorrect information from long-term memory.")]
+    pub fn delete_memory(
+        &self,
+        Parameters(DeleteMemoryRequest { memory_id }): Parameters<DeleteMemoryRequest>,
+    ) -> Json<DeleteMemoryResponse> {
+        let db = match self.db.lock() {
+            Ok(db) => db,
+            Err(e) => {
+                return Json(DeleteMemoryResponse {
+                    success: false,
+                    error: Some(format!("Database lock error: {}", e)),
+                });
+            }
+        };
+
+        match db.execute("DELETE FROM memory WHERE id = ?", [memory_id]) {
+            Ok(rows_affected) => {
+                if rows_affected > 0 {
+                    Json(DeleteMemoryResponse {
+                        success: true,
+                        error: None,
+                    })
+                } else {
+                    Json(DeleteMemoryResponse {
+                        success: false,
+                        error: Some("Memory entry not found".to_string()),
+                    })
+                }
+            }
+            Err(e) => {
+                Json(DeleteMemoryResponse {
+                    success: false,
+                    error: Some(format!("Failed to delete memory: {}", e)),
+                })
+            }
+        }
+    }
 }
 
 #[tool_handler]
 impl ServerHandler for ConversationService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("MCP server for searching and retrieving past conversations with the user from Cosmic LLM history.".to_string()),
+            instructions: Some("MCP server for searching and retrieving past conversations with the user from Cosmic LLM history. Also provides memory persistence capabilities - use search_memory to check for user preferences, technical setups, or important facts stored in previous conversations before answering questions.".to_string()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }
