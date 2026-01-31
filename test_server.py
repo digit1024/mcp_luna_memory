@@ -193,7 +193,11 @@ class MCPServerTester:
             "get_conversation",
             "search_conversation_titles",
             "list_conversations",
-            "get_message"
+            "get_message",
+            "store_memory",
+            "search_memory",
+            "search_memory_by_category",
+            "delete_memory",
         ]
         
         print(f"\nFound tools: {', '.join(tool_names)}")
@@ -251,7 +255,7 @@ class MCPServerTester:
         response = self.send_request("tools/call", {
             "name": "search_conversations",
             "arguments": {
-                "query": "test"
+                "keywords": ["test"]
             }
         })
         
@@ -274,6 +278,60 @@ class MCPServerTester:
             print(f"  - Message {result.get('message_id')} in conversation {result.get('conversation_id')}: {preview}...")
         
         print("✓ Search conversations test passed")
+        return response["result"]
+
+    def test_search_memory(self, tools):
+        """Test search_memory tool."""
+        print("\n" + "="*60)
+        print("TEST 6: Search Memory")
+        print("="*60)
+        
+        tool = next((t for t in tools if t["name"] == "search_memory"), None)
+        assert tool is not None, "search_memory tool not found"
+        
+        response = self.send_request("tools/call", {
+            "name": "search_memory",
+            "arguments": {"keywords": ["moltbook", "security"]},
+        })
+        
+        assert response.get("jsonrpc") == "2.0", "Invalid JSON-RPC version"
+        assert "result" in response, "No result in response"
+        assert "content" in response["result"], "No content in result"
+        
+        response_data = json.loads(response["result"]["content"][0].get("text", "{}"))
+        items = response_data.get("items", [])
+        print(f"\n✓ search_memory returned {len(items)} items")
+        for item in items[:3]:
+            print(f"  - id={item.get('id')} category={item.get('category')} {item.get('content', '')[:50]}...")
+        
+        print("✓ Search memory test passed")
+        return response["result"]
+
+    def test_search_memory_by_category(self, tools):
+        """Test search_memory_by_category tool."""
+        print("\n" + "="*60)
+        print("TEST 7: Search Memory by Category")
+        print("="*60)
+        
+        tool = next((t for t in tools if t["name"] == "search_memory_by_category"), None)
+        assert tool is not None, "search_memory_by_category tool not found"
+        
+        response = self.send_request("tools/call", {
+            "name": "search_memory_by_category",
+            "arguments": {"category": "moltbook"},
+        })
+        
+        assert response.get("jsonrpc") == "2.0", "Invalid JSON-RPC version"
+        assert "result" in response, "No result in response"
+        assert "content" in response["result"], "No content in result"
+        
+        response_data = json.loads(response["result"]["content"][0].get("text", "{}"))
+        items = response_data.get("items", [])
+        print(f"\n✓ search_memory_by_category(category='moltbook') returned {len(items)} items")
+        for item in items[:3]:
+            print(f"  - id={item.get('id')} {item.get('content', '')[:50]}...")
+        
+        print("✓ Search memory by category test passed")
         return response["result"]
 
     def run_all_tests(self):
@@ -311,6 +369,8 @@ class MCPServerTester:
             tools = self.test_list_tools()
             self.test_list_conversations(tools)
             self.test_search_conversations(tools)
+            self.test_search_memory(tools)
+            self.test_search_memory_by_category(tools)
             
             print("\n" + "="*60)
             print("✓ ALL TESTS PASSED!")

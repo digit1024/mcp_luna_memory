@@ -4,8 +4,8 @@ use schemars::JsonSchema;
 // Conversation-related request types
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SearchConversationsRequest {
-    #[schemars(description = "Search query to find in conversation messages")]
-    pub query: String,
+    #[schemars(description = "Keywords to search in conversation messages (OR semantics)")]
+    pub keywords: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -109,8 +109,14 @@ pub struct StoreMemoryRequest {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchMemoryRequest {
-    #[schemars(description = "Free-form text or FTS5 syntax (e.g., 'axum AND middleware')")]
-    pub query: String,
+    #[schemars(description = "Keywords to search in memory (OR semantics)")]
+    pub keywords: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SearchMemoryByCategoryRequest {
+    #[schemars(description = "Category to filter memory entries (e.g. 'moltbook', 'work', 'personal')")]
+    pub category: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

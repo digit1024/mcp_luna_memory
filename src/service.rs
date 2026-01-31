@@ -11,38 +11,51 @@ use crate::db;
 use crate::models::*;
 
 pub struct ConversationService {
-    db: Arc<Mutex<Connection>>,
+    /// DB path; connection is opened lazily after MCP handshake so Inspector gets a fast initialize response.
+    db_path: String,
+    db: Arc<Mutex<Option<Connection>>>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router(router = tool_router)]
 impl ConversationService {
+    /// Create service without opening the DB. DB is opened on first tool use so the MCP handshake
+    /// (initialize → response → notifications/initialized) completes immediately for Inspector/stdio clients.
     pub fn new(db_path: &str) -> Result<Self> {
-        let conn = Connection::open(db_path)
-            .context("Failed to open database connection")?;
-
-        // Initialize memory module schema
-        db::init_memory_schema(&conn)?;
-
         Ok(Self {
-            db: Arc::new(Mutex::new(conn)),
+            db_path: db_path.to_string(),
+            db: Arc::new(Mutex::new(None)),
             tool_router: Self::tool_router(),
         })
+    }
+
+    /// Get or open DB; opens and inits schema on first use. Ensures nothing blocks before serve() reads stdin.
+    fn with_db<F, R>(&self, f: F) -> Result<R>
+    where
+        F: FnOnce(&Connection) -> R,
+    {
+        let mut guard = self.db.lock().map_err(|_| anyhow::anyhow!("db lock poisoned"))?;
+        if guard.is_none() {
+            let conn = Connection::open(&self.db_path)
+                .context("Failed to open database connection")?;
+            db::init_memory_schema(&conn)?;
+            *guard = Some(conn);
+        }
+        Ok(f(guard.as_ref().unwrap()))
     }
 
     #[tool(description = "Search across all past conversations with the user using full-text search. This tool searches through message content in all conversation history, allowing you to find relevant past discussions based on keywords or phrases.")]
     pub fn search_conversations(
         &self,
-        Parameters(SearchConversationsRequest { query }): Parameters<SearchConversationsRequest>,
+        Parameters(SearchConversationsRequest { keywords }): Parameters<SearchConversationsRequest>,
     ) -> Json<SearchResultsResponse> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(SearchResultsResponse { items: Vec::new() });
-            }
-        };
-        
-        let mut stmt = match db.prepare(
+        let fts_query = keywords.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" OR ");
+        if fts_query.is_empty() {
+            return Json(SearchResultsResponse { items: Vec::new() });
+        }
+
+        match self.with_db(|db| {
+            let mut stmt = match db.prepare(
             r#"
             SELECT DISTINCT
                 m.id,
@@ -63,7 +76,7 @@ impl ConversationService {
             }
         };
 
-        let results: Vec<SearchResult> = match stmt.query_map([query.as_str()], |row| {
+        let results: Vec<SearchResult> = match stmt.query_map([&fts_query], |row| {
             Ok(SearchResult {
                 message_id: row.get(0).unwrap_or(0),
                 conversation_id: row.get(1).unwrap_or_default(),
@@ -85,7 +98,11 @@ impl ConversationService {
             }
         };
 
-        Json(SearchResultsResponse { items: results })
+            Json(SearchResultsResponse { items: results })
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(SearchResultsResponse { items: Vec::new() }),
+        }
     }
 
     #[tool(description = "Retrieve a complete conversation thread from past conversations with the user. Returns the full conversation including all messages, tool calls, and responses in chronological order. Returns empty object if not found.")]
@@ -93,20 +110,15 @@ impl ConversationService {
         &self,
         Parameters(GetConversationRequest { conversation_id }): Parameters<GetConversationRequest>,
     ) -> Json<Conversation> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(Conversation {
-                    id: conversation_id.clone(),
-                    title: "ERROR".to_string(),
-                    created_at: 0,
-                    title_generated: 0,
-                    profile_name: None,
-                    messages: Vec::new(),
-                });
-            }
-        };
-        
+        let empty_err = Json(Conversation {
+            id: conversation_id.clone(),
+            title: "ERROR".to_string(),
+            created_at: 0,
+            title_generated: 0,
+            profile_name: None,
+            messages: Vec::new(),
+        });
+        match self.with_db(|db| {
         // Get conversation metadata
         let mut conv_stmt = match db.prepare(
             "SELECT id, title, created_at, title_generated, profile_name FROM conversations WHERE id = ?"
@@ -208,6 +220,10 @@ impl ConversationService {
 
         conversation.messages = messages;
         Json(conversation)
+        }) {
+            Ok(json) => json,
+            Err(_) => empty_err,
+        }
     }
 
     #[tool(description = "Search conversation titles from past conversations with the user. This tool helps you quickly find conversations by their titles when you remember the topic but not the exact conversation ID.")]
@@ -216,13 +232,7 @@ impl ConversationService {
         Parameters(SearchTitlesRequest { query }): Parameters<SearchTitlesRequest>,
     ) -> Json<ConversationSummariesResponse> {
         let search_pattern = format!("%{}%", query);
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(ConversationSummariesResponse { items: Vec::new() });
-            }
-        };
-        
+        match self.with_db(|db| {
         let mut stmt = match db.prepare(
             r#"
             SELECT 
@@ -270,6 +280,10 @@ impl ConversationService {
         };
 
         Json(ConversationSummariesResponse { items: results })
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(ConversationSummariesResponse { items: Vec::new() }),
+        }
     }
 
     #[tool(description = "List past conversations with the user, ordered by most recent. Useful for browsing conversation history and finding conversations by recency.")]
@@ -280,13 +294,7 @@ impl ConversationService {
         let limit = limit.unwrap_or(50).min(200) as i64;
         let offset = offset.unwrap_or(0) as i64;
 
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(ConversationSummariesResponse { items: Vec::new() });
-            }
-        };
-        
+        match self.with_db(|db| {
         let mut stmt = match db.prepare(
             r#"
             SELECT 
@@ -333,6 +341,10 @@ impl ConversationService {
         };
 
         Json(ConversationSummariesResponse { items: results })
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(ConversationSummariesResponse { items: Vec::new() }),
+        }
     }
 
     #[tool(description = "Retrieve a specific message from past conversations with the user by its message ID. Returns the complete message including content, role, tool calls, and any associated metadata. Returns empty message if not found.")]
@@ -340,26 +352,21 @@ impl ConversationService {
         &self,
         Parameters(GetMessageRequest { message_id }): Parameters<GetMessageRequest>,
     ) -> Json<Message> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(Message {
-                    id: message_id,
-                    conversation_id: "ERROR".to_string(),
-                    role: "error".to_string(),
-                    content: "Database lock error".to_string(),
-                    created_at: 0,
-                    tool_calls: None,
-                    tool_call_id: None,
-                    tool_name: None,
-                    tool_status: None,
-                    tool_params_json: None,
-                    tool_result_json: None,
-                    reasoning_content: None,
-                });
-            }
-        };
-        
+        let lock_err_msg = Json(Message {
+            id: message_id,
+            conversation_id: "ERROR".to_string(),
+            role: "error".to_string(),
+            content: "Database lock error".to_string(),
+            created_at: 0,
+            tool_calls: None,
+            tool_call_id: None,
+            tool_name: None,
+            tool_status: None,
+            tool_params_json: None,
+            tool_result_json: None,
+            reasoning_content: None,
+        });
+        match self.with_db(|db| {
         let mut stmt = match db.prepare(
             r#"
             SELECT 
@@ -440,6 +447,10 @@ impl ConversationService {
                 })
             }
         }
+        }) {
+            Ok(json) => json,
+            Err(_) => lock_err_msg,
+        }
     }
 
     #[tool(description = "THIS IS A TOOL TO REMEMBER, OR TO UPDATE(Delete and then create) THE MEMORY.USE IT OFTEN TO REMEMBER IMPORTANT STUFF! Store important facts, preferences, or relevant information in long-term memory.")]
@@ -451,19 +462,14 @@ impl ConversationService {
             importance,
         }): Parameters<StoreMemoryRequest>,
     ) -> Json<MemoryEntry> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(MemoryEntry {
-                    id: 0,
-                    content: "Database lock error".to_string(),
-                    category: None,
-                    importance: 0,
-                    created_at: 0,
-                });
-            }
-        };
-
+        let lock_err = Json(MemoryEntry {
+            id: 0,
+            content: "Database lock error".to_string(),
+            category: None,
+            importance: 0,
+            created_at: 0,
+        });
+        match self.with_db(|db| {
         let importance_value = importance.unwrap_or(5);
         let created_at = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -494,20 +500,23 @@ impl ConversationService {
                 })
             }
         }
+        }) {
+            Ok(json) => json,
+            Err(_) => lock_err,
+        }
     }
 
     #[tool(description = "THISI IS A TOOL TO REMIND/GET CONTEXT FROM MEMORY. USE IT OFTEN! USE IT TOGETHER WITH CHAT HISTORY IF NEEDED (for details) ! Search long-term memory using full-text search. This tool finds relevant stored knowledge based on keywords or phrases. Results are ranked by relevance.")]
     pub fn search_memory(
         &self,
-        Parameters(SearchMemoryRequest { query }): Parameters<SearchMemoryRequest>,
+        Parameters(SearchMemoryRequest { keywords }): Parameters<SearchMemoryRequest>,
     ) -> Json<MemorySearchResponse> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(_) => {
-                return Json(MemorySearchResponse { items: Vec::new() });
-            }
-        };
+        let fts_query = keywords.iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" OR ");
+        if fts_query.is_empty() {
+            return Json(MemorySearchResponse { items: Vec::new() });
+        }
 
+        match self.with_db(|db| {
         let mut stmt = match db.prepare(
             r#"
             SELECT 
@@ -529,7 +538,7 @@ impl ConversationService {
             }
         };
 
-        let results: Vec<MemoryEntry> = match stmt.query_map([query.as_str()], |row| {
+        let results: Vec<MemoryEntry> = match stmt.query_map([&fts_query], |row| {
             Ok(MemoryEntry {
                 id: row.get(0).unwrap_or(0),
                 content: row.get(1).unwrap_or_default(),
@@ -552,6 +561,60 @@ impl ConversationService {
         };
 
         Json(MemorySearchResponse { items: results })
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(MemorySearchResponse { items: Vec::new() }),
+        }
+    }
+
+    #[tool(description = "Search long-term memory by category. Returns all memory entries in the given category (e.g. 'moltbook', 'work', 'personal', 'security').")]
+    pub fn search_memory_by_category(
+        &self,
+        Parameters(SearchMemoryByCategoryRequest { category }): Parameters<SearchMemoryByCategoryRequest>,
+    ) -> Json<MemorySearchResponse> {
+        if category.is_empty() {
+            return Json(MemorySearchResponse { items: Vec::new() });
+        }
+
+        match self.with_db(|db| {
+        let mut stmt = match db.prepare(
+            r#"
+            SELECT id, content, category, importance, created_at
+            FROM memory
+            WHERE category = ?
+            ORDER BY importance DESC, created_at DESC
+            LIMIT 50
+            "#
+        ) {
+            Ok(stmt) => stmt,
+            Err(_) => {
+                return Json(MemorySearchResponse { items: Vec::new() });
+            }
+        };
+
+        let results: Vec<MemoryEntry> = match stmt.query_map([&category], |row| {
+            Ok(MemoryEntry {
+                id: row.get(0).unwrap_or(0),
+                content: row.get(1).unwrap_or_default(),
+                category: row.get(2).ok(),
+                importance: row.get(3).unwrap_or(5),
+                created_at: row.get(4).unwrap_or(0),
+            })
+        }) {
+            Ok(iter) => {
+                match iter.collect::<Result<Vec<_>, _>>() {
+                    Ok(results) => results,
+                    Err(_) => Vec::new(),
+                }
+            }
+            Err(_) => Vec::new(),
+        };
+
+        Json(MemorySearchResponse { items: results })
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(MemorySearchResponse { items: Vec::new() }),
+        }
     }
 
     #[tool(description = "THIS IS A TOOL TO FORGET, OR TO UPDATE(Delete and then create) THE MEMORY USE IT TO CORRECT YOUR MEMORIES. Delete a memory entry by its ID. Use this to remove outdated or incorrect information from long-term memory.")]
@@ -559,16 +622,7 @@ impl ConversationService {
         &self,
         Parameters(DeleteMemoryRequest { memory_id }): Parameters<DeleteMemoryRequest>,
     ) -> Json<DeleteMemoryResponse> {
-        let db = match self.db.lock() {
-            Ok(db) => db,
-            Err(e) => {
-                return Json(DeleteMemoryResponse {
-                    success: false,
-                    error: Some(format!("Database lock error: {}", e)),
-                });
-            }
-        };
-
+        match self.with_db(|db| {
         match db.execute("DELETE FROM memory WHERE id = ?", [memory_id]) {
             Ok(rows_affected) => {
                 if rows_affected > 0 {
@@ -589,6 +643,13 @@ impl ConversationService {
                     error: Some(format!("Failed to delete memory: {}", e)),
                 })
             }
+        }
+        }) {
+            Ok(json) => json,
+            Err(_) => Json(DeleteMemoryResponse {
+                success: false,
+                error: Some("Database open/lock error".to_string()),
+            }),
         }
     }
 }

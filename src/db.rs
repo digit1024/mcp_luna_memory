@@ -54,6 +54,10 @@ pub fn init_memory_schema(conn: &Connection) -> Result<()> {
     )
     .context("Failed to create memory_ad trigger")?;
 
+    // Rebuild FTS index from content table (syncs pre-existing rows not covered by triggers)
+    conn.execute("INSERT INTO memory_fts(memory_fts) VALUES('rebuild')", [])
+        .context("Failed to rebuild memory_fts index")?;
+
     Ok(())
 }
 
